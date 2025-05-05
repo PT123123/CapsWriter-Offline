@@ -41,12 +41,33 @@ def signal_handler(signum, frame):
 signal.signal(signal.SIGTERM, signal_handler)
 signal.signal(signal.SIGABRT, signal_handler)
 
-# 托盘图标路径
-if getattr(sys, 'frozen', False):
-    BASE_DIR = sys._MEIPASS
-else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ICON_PATH = os.path.join(BASE_DIR, "assets", "icon.ico")
+# 获取程序运行目录
+BASE_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__))
+def get_icon_path():
+    try:
+        # 首先尝试从PyInstaller打包后的资源目录加载
+        if getattr(sys, 'frozen', False):
+            icon_path = os.path.join(sys._MEIPASS, "assets", "icon.ico")
+        else:
+            # 开发环境下从当前目录加载
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icon.ico")
+        
+        if not os.path.exists(icon_path):
+            logging.error(f"图标文件不存在：{icon_path}")
+            # 尝试在其他可能的位置查找图标
+            alt_paths = [
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icon.ico"),
+                os.path.join(os.getcwd(), "assets", "icon.ico")
+            ]
+            for alt_path in alt_paths:
+                if os.path.exists(alt_path):
+                    logging.info(f"使用备选图标路径：{alt_path}")
+                    return alt_path
+            raise FileNotFoundError(f"无法找到图标文件，已尝试的路径：{[icon_path] + alt_paths}")
+        return icon_path
+    except Exception as e:
+        logging.error(f"获取图标路径时出错：{str(e)}")
+        return None
 
 class LogHandler(logging.Handler):
     def __init__(self, text_widget):
@@ -384,23 +405,70 @@ class MainWindow(QMainWindow):
         event.accept()
 
 def start_core_server(log_emitter, window):
+    # 记录当前工作目录和启动路径信息
+    current_dir = os.getcwd()
+    server_exe_path = os.path.join(BASE_DIR, "start_server.exe")
+    logging.info(f"当前工作目录: {current_dir}")
+    logging.info(f"服务器启动文件路径: {server_exe_path}")
+    
+    # 检查服务器可执行文件是否存在
+    if not os.path.exists(server_exe_path):
+        error_msg = f"错误：服务器可执行文件不存在: {server_exe_path}"
+        logging.error(error_msg)
+        log_emitter.emit_log(error_msg)
+        return
+    
+    # 检查文件权限
+    try:
+        with open(server_exe_path, 'rb') as _:
+            pass
+        logging.info("服务器可执行文件权限检查通过")
+    except PermissionError as e:
+        error_msg = f"错误：无法访问服务器可执行文件，权限不足: {str(e)}"
+        logging.error(error_msg)
+        log_emitter.emit_log(error_msg)
+        return
+    
     # 在启动新进程前检查并清理已存在的start_server.exe进程
+    existing_processes = []
     for proc in psutil.process_iter(['pid', 'name']):
         try:
             if proc.info['name'] == 'start_server.exe':
-                psutil.Process(proc.info['pid']).terminate()
-                logging.info(f"终止已存在的start_server.exe进程 (PID: {proc.info['pid']})")
+                existing_processes.append(proc.info['pid'])
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             pass
-            
-    window.server_process = subprocess.Popen(
-        [os.path.join(BASE_DIR, "start_server.exe")],  # 直接运行exe
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        universal_newlines=True,
-        creationflags=subprocess.CREATE_NO_WINDOW,
-        bufsize=1
-    )
+    
+    if existing_processes:
+        logging.info(f"发现{len(existing_processes)}个已存在的服务器进程")
+        for pid in existing_processes:
+            try:
+                psutil.Process(pid).terminate()
+                logging.info(f"已终止服务器进程 (PID: {pid})")
+            except Exception as e:
+                logging.warning(f"终止进程 {pid} 时出错: {str(e)}")
+    
+    logging.info("准备启动服务器进程...")
+    command = [os.path.join(BASE_DIR, "start_server.exe")]
+    logging.info(f"启动命令: {' '.join(command)}")
+    log_emitter.emit_log("正在启动服务器进程...")
+    
+    try:
+        window.server_process = subprocess.Popen(
+            command,  # 直接运行exe
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            bufsize=1
+        )
+        success_msg = f"服务器进程已启动，PID: {window.server_process.pid}"
+        logging.info(success_msg)
+        log_emitter.emit_log(success_msg)
+    except Exception as e:
+        error_msg = f"启动服务器进程失败: {str(e)}"
+        logging.error(error_msg)
+        log_emitter.emit_log(error_msg)
+        return
     
     def read_output(stream, emitter):
         for line in iter(stream.readline, ''):
@@ -415,10 +483,10 @@ def start_core_server(log_emitter, window):
 
 def main():
     try:
-        # 检查图标文件是否存在
-        if not os.path.exists(ICON_PATH):
-            logging.error(f"找不到图标文件：{ICON_PATH}")
-            sys.exit(1)
+        # 获取图标路径
+        icon_path = get_icon_path()
+        if not icon_path:
+            logging.warning("将使用默认图标继续运行")
 
         app = QApplication(sys.argv)
         app.setQuitOnLastWindowClosed(False)
@@ -457,10 +525,13 @@ def main():
             sys.exit(1)
 
         tray = QSystemTrayIcon()
-        icon = QIcon(ICON_PATH)
-        if icon.isNull():
-            logging.error(f"无法加载图标文件：{ICON_PATH}")
-            sys.exit(1)
+        if icon_path:
+            icon = QIcon(icon_path)
+            if icon.isNull():
+                logging.error(f"无法加载图标文件：{icon_path}")
+                icon = QIcon()
+        else:
+            icon = QIcon()
             
         tray.setIcon(icon)
         tray.setToolTip("CapsWriter-Offline")
