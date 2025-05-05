@@ -48,6 +48,9 @@ def get_icon_path():
         # 首先尝试从PyInstaller打包后的资源目录加载
         if getattr(sys, 'frozen', False):
             icon_path = os.path.join(sys._MEIPASS, "assets", "icon.ico")
+            if not os.path.exists(icon_path):
+                # 如果在MEIPASS中找不到，尝试在程序所在目录查找
+                icon_path = os.path.join(BASE_DIR, "assets", "icon.ico")
         else:
             # 开发环境下从当前目录加载
             icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icon.ico")
@@ -56,14 +59,15 @@ def get_icon_path():
             logging.error(f"图标文件不存在：{icon_path}")
             # 尝试在其他可能的位置查找图标
             alt_paths = [
-                os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icon.ico"),
+                os.path.join(os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__)), "assets", "icon.ico"),
                 os.path.join(os.getcwd(), "assets", "icon.ico")
             ]
             for alt_path in alt_paths:
                 if os.path.exists(alt_path):
                     logging.info(f"使用备选图标路径：{alt_path}")
                     return alt_path
-            raise FileNotFoundError(f"无法找到图标文件，已尝试的路径：{[icon_path] + alt_paths}")
+            logging.warning("无法找到图标文件，将使用空图标继续运行")
+            return None
         return icon_path
     except Exception as e:
         logging.error(f"获取图标路径时出错：{str(e)}")
@@ -318,7 +322,11 @@ class MainWindow(QMainWindow):
             logging.getLogger().addHandler(LogHandler(self.client_log))
         
         try:
-            self.setWindowIcon(QIcon(ICON_PATH))
+            icon_path = get_icon_path()
+            if icon_path:
+                self.setWindowIcon(QIcon(icon_path))
+            else:
+                logging.warning("使用默认窗口图标")
         except Exception as e:
             logging.error(f"设置窗口图标失败：{str(e)}")
         
